@@ -1,0 +1,32 @@
+{
+  "name": "ERa",
+  "version": "1.6.4",
+  "description": "E-Ra by EoH. An IoT Market Enabler! It supports WiFi, Ethernet, Zigbee, Modbus, Serial. Works with boards like Arduino, ESP8266, ESP32, STM32, Raspberry Pi...",
+  "keywords": "ERa, E-Ra, esp8266, esp32, stm32, raspberry-pi, http, mqtt, zigbee, modbus, sensors, control, device, smartphone, mobile, app, web, cloud, communication, protocol, iot, wifi, ethernet, serial",
+  "authors":
+  {
+    "name":  "EoH Ltd",
+    "email": "info@eoh.io",
+    "url":   "https://github.com/eoh-jsc",
+    "maintainer": true
+  },
+  "repository":
+  {
+    "type": "git",
+    "url": "https://github.com/eoh-jsc/era-lib.git"
+  },
+  "homepage": "https://e-ra.io",
+  "export": {
+    "exclude": [
+      "linux",
+      "extras",
+      "tests"
+    ]
+  },
+  "build": {
+    "extraScript": "scripts/after_install.py"
+  },
+  "frameworks": "*",
+  "platforms": "*",
+  "examples": "examples/*/*.ino"
+}

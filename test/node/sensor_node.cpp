@@ -1,0 +1,202 @@
+#define SENSOR_NODE
+
+#include "device_config.h"
+#include "sensor_config.h"
+#include <LoRa.h>
+#include <esp_sleep.h>
+
+#define uS_TO_S_FACTOR 1000000  // Chuyển giây thành micro giây
+#define TIME_TO_SLEEP 60        // Thời gian ngủ (giây)
+#define SENSOR_NODE_ID 1
+#define PACKET_TIMEOUT 1000     // thời gian chờ giữa các packet
+
+QueueHandle_t loraPackage;
+unsigned long packetTime = 0;    // thời gian hiện tại của packet
+bool finishDecodePkg = false;     // xử lý hết packet rồi mới vào loop
+
+TaskHandle_t HandleLoRaProcessTask;
+TaskHandle_t HandleLoRaReceiveTask;
+
+void LoRaProcessTask(void *pvParameters)
+{
+    for (;;)
+    {
+        int numPackets = uxQueueMessagesWaiting(loraPackage);
+
+        if (numPackets > 0)
+        {
+            // Nếu đã đủ thời gian không nhận thêm packet, thì bắt đầu xử lý batch
+            if (millis() - packetTime > PACKET_TIMEOUT)
+            {
+                Serial.printf("🧮 Start decoding batch (%d packets)\n", numPackets);
+                
+                while (uxQueueMessagesWaiting(loraPackage) > 0)
+                {
+                    Packet pkt;
+                    if (xQueueReceive(loraPackage, &pkt, 0) == pdTRUE)
+                    {
+                        decodeSensorPacket(pkt.data, pkt.len, mac_sens_node[SENSOR_NODE_ID - 1]);
+                    }
+                }
+                Serial.println("✅ Finished decoding batch");
+                finishDecodePkg = true;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(200)); // Giảm tần suất kiểm tra
+    }
+}
+
+void LoRaReceiveTask(void *pvParameters)
+{
+    for (;;)
+    {
+        int packetSize = LoRa.parsePacket();
+        if (packetSize)
+        {
+            Packet pkt;
+            int bytesRead = 0;
+            while (LoRa.available() && bytesRead < packetSize)
+            {
+                pkt.data[bytesRead++] = LoRa.read();
+            }
+            pkt.len = bytesRead;
+
+            Serial.print("📦 Received packet: ");
+            for (int i = 0; i < pkt.len; i++)
+            {
+                Serial.printf("%02X ", pkt.data[i]);
+            }
+            Serial.println();
+
+            packetTime = millis(); // cập nhật thời gian nhận mới nhất
+
+            if (xQueueSend(loraPackage, &pkt, 0) != pdPASS)
+            {
+                Serial.println("⚠️ Queue full, packet dropped");
+            }
+            else
+            {
+                Serial.println("📥 Packet pushed to queue");
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10)); // để tránh chiếm CPU
+    }
+}
+
+void deepSleepStart()
+{
+    Serial.println("ESP32 đang vào Deep Sleep...");
+
+    // Cấu hình thời gian ngủ
+    esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+
+    Serial.println("ESP32 sẽ thức dậy sau " + String(TIME_TO_SLEEP) + " giây...");
+    Serial.flush();  // Đảm bảo dữ liệu được in hết trước khi ngủ
+    esp_deep_sleep_start();  // Bắt đầu Deep Sleep
+}
+
+unsigned long lastSendTime = 0, lastReadTime = 0;;
+static bool isConfiged = false;
+const unsigned long sendInterval = 5000, readInterval = 200;
+uint8_t total_send_count = 0;
+extern bool ackReceived;
+
+void setup()
+{
+    setCpuFrequencyMhz(80);
+    Serial.begin(115200);
+    while (!Serial)
+        ;
+    Serial.println("Initializing Sensor Node");
+    printMacAddress(mac_sens_node[SENSOR_NODE_ID - 1]);
+    // init_current_sensor();
+
+    loraPackage = xQueueCreate(10, sizeof(Packet));
+    if (!loraPackage)
+    {
+        Serial.println("❌ Failed to create Queue");
+        while (1)
+            ;
+    }
+
+    loraInit();                               // Khởi tạo LoRa
+    loraConfig(433E6, 14, 7, 125E3, 0xA5, 5); // Cấu hình LoRa: tần số 433MHz, công suất phát 17dBm, SF7, BW125kHz, sync word 0xA5, CR5 (4/5)
+
+    delay(1000);
+    LoRa.idle(); // Bắt đầu lắng nghe sau khi init
+
+    pinMode(25, OUTPUT);
+    pinMode(26, OUTPUT);
+    pinMode(27, OUTPUT);
+    pinMode(14, OUTPUT);
+    pinMode(13, OUTPUT);
+
+    // digitalWrite(25, LOW);
+    // digitalWrite(26, LOW);
+    // digitalWrite(27, LOW);
+    // digitalWrite(14, LOW);
+    // digitalWrite(13, LOW);
+
+    digitalWrite(25, HIGH);
+    digitalWrite(26, HIGH);
+    digitalWrite(27, HIGH);
+    digitalWrite(14, HIGH);
+    digitalWrite(13, HIGH);
+
+    xTaskCreatePinnedToCore(
+        LoRaProcessTask,        // Hàm xử lý
+        "LoRaProcessTask",      // Tên Task
+        4096,          // Stack size
+        NULL,           // Tham số truyền vào
+        3,              // Mức ưu tiên (1 = thấp)
+        &HandleLoRaProcessTask, // Handle
+        1               // Chạy trên core 1
+    );
+
+    xTaskCreatePinnedToCore(
+        LoRaReceiveTask,
+        "LoRaReceiveTask",
+        4096,
+        NULL,
+        1,
+        &HandleLoRaReceiveTask,
+        1
+    );
+}
+
+void loop()
+{
+    // đọc dữ liệu cảm biến mỗi 0.2s
+    if(millis() - lastReadTime > readInterval)
+    {    
+        lastReadTime = millis();
+        check_sensor_status();
+        read_sensor_node_data();
+    }
+    // Gửi dữ liệu cảm biến định kỳ
+    if (millis() - lastSendTime >= sendInterval)
+    {
+        lastSendTime = millis();
+        if(sendSensorData(mac_sens_node[SENSOR_NODE_ID - 1]))
+        {
+            Serial.println("📤 Gửi dữ liệu cảm biến thành công!");
+            total_send_count++;
+        }
+        else 
+            Serial.println("❌ Chưa thể gửi dữ liệu cảm biến.");
+    }
+
+    if (ackReceived)
+    {
+        ackReceived = false;
+        Serial.println("✅ Đã nhận ACK từ Gateway, đi ngủ thôi");
+        deepSleepStart();
+    }
+
+    if(total_send_count == 10)
+    {
+        Serial.println("Gửi 10 lần không có phản hồi ACK, đi ngủ thôi");
+        deepSleepStart();
+    }
+}
